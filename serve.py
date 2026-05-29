@@ -436,12 +436,36 @@ def _watchdog():
             return
 
 
+def _kill_stale_x11vnc(keep_pid=None):
+    try:
+        out = subprocess.check_output(["pgrep", "-a", "x11vnc"], text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return
+    killed = 0
+    for line in out.strip().splitlines():
+        pid = int(line.split()[0])
+        if pid == keep_pid:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except OSError:
+            pass
+    if killed:
+        subprocess.Popen(
+            ["notify-send", "spicetab",
+             f"Killed {killed} stale x11vnc process{'es' if killed > 1 else ''}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+
 def main():
     global _httpd, _vnc_port, _ws_port, _http_port, _current_screen
 
     _ensure_novnc()
 
     inherited = os.environ.pop(f"{_ENV_PREFIX}VNC_PID", None)
+    _kill_stale_x11vnc(keep_pid=int(inherited) if inherited else None)
 
     if inherited:
         # Adopt existing child processes after execv reload
