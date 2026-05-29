@@ -26,14 +26,58 @@ NOVNC_DIR = ROOT / ".novnc"
 DISPLAY = os.environ.get("DISPLAY", ":0")
 IDLE_TIMEOUT = 300
 
+_ENV_PREFIX = "_SPICETAB_"
+_SCRIPT = Path(__file__).resolve()
+
 _last_ping = time.time()
-_procs: list[subprocess.Popen] = []
+_procs: list = []
 _httpd = None
 _stopping = threading.Event()
 _vnc_port = None
+_ws_port = None
+_http_port = None
 _vnc_lock = threading.Lock()
 _vnc_restarting = False
 _current_screen = "all"
+
+
+class _AdoptedProcess:
+    """Wrap a PID for a child process we inherited across execv."""
+
+    def __init__(self, pid, name):
+        self.pid = pid
+        self.args = [name]
+        self.returncode = None
+
+    def poll(self):
+        if self.returncode is not None:
+            return self.returncode
+        try:
+            os.kill(self.pid, 0)
+            return None
+        except ProcessLookupError:
+            self.returncode = -1
+            return self.returncode
+
+    def terminate(self):
+        os.kill(self.pid, signal.SIGTERM)
+
+    def kill(self):
+        os.kill(self.pid, signal.SIGKILL)
+
+    def wait(self, timeout=None):
+        deadline = time.time() + (timeout or 60)
+        while time.time() < deadline:
+            try:
+                pid, status = os.waitpid(self.pid, os.WNOHANG)
+                if pid:
+                    self.returncode = os.waitstatus_to_exitcode(status)
+                    return self.returncode
+            except ChildProcessError:
+                if self.poll() is not None:
+                    return self.returncode
+            time.sleep(0.05)
+        raise subprocess.TimeoutExpired(self.args, timeout)
 
 
 def _parse_screens():
@@ -337,6 +381,36 @@ def _handler_class(ws_port):
     return Handler
 
 
+def _reload():
+    """Stash child state in env vars and re-exec ourselves."""
+    vnc_proc = next((p for p in _procs if p.args[0] == "x11vnc"), None)
+    ws_proc = next((p for p in _procs if p.args[0] != "x11vnc"), None)
+    if vnc_proc:
+        os.environ[f"{_ENV_PREFIX}VNC_PID"] = str(vnc_proc.pid)
+    if ws_proc:
+        os.environ[f"{_ENV_PREFIX}WS_PID"] = str(ws_proc.pid)
+    os.environ[f"{_ENV_PREFIX}VNC_PORT"] = str(_vnc_port)
+    os.environ[f"{_ENV_PREFIX}WS_PORT"] = str(_ws_port)
+    os.environ[f"{_ENV_PREFIX}HTTP_PORT"] = str(_http_port)
+    os.environ[f"{_ENV_PREFIX}SCREEN"] = _current_screen
+    if _httpd:
+        _httpd.shutdown()
+    print("\n  Reloading...\n")
+    os.execv(sys.executable, [sys.executable, str(_SCRIPT)])
+
+
+def _file_watcher():
+    mtime = _SCRIPT.stat().st_mtime
+    while not _stopping.wait(1):
+        try:
+            new_mtime = _SCRIPT.stat().st_mtime
+        except OSError:
+            continue
+        if new_mtime != mtime:
+            _reload()
+            return
+
+
 def _cleanup():
     _stopping.set()
     for p in _procs:
@@ -363,61 +437,76 @@ def _watchdog():
 
 
 def main():
-    global _httpd, _vnc_port
+    global _httpd, _vnc_port, _ws_port, _http_port, _current_screen
 
     _ensure_novnc()
 
-    vnc_port = _vnc_port = _free_port()
-    ws_port = _free_port()
-    http_port = _free_port()
+    inherited = os.environ.pop(f"{_ENV_PREFIX}VNC_PID", None)
 
-    # x11vnc
-    try:
-        x11vnc = subprocess.Popen(
-            [
-                "x11vnc", "-display", DISPLAY, "-viewonly", "-shared",
-                "-forever", "-nopw", "-rfbport", str(vnc_port), "-q",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        sys.exit("x11vnc not found — install it (e.g. apt install x11vnc)")
-    _procs.append(x11vnc)
-    time.sleep(0.5)
-    if x11vnc.poll() is not None:
-        sys.exit("x11vnc failed to start")
+    if inherited:
+        # Adopt existing child processes after execv reload
+        vnc_port = _vnc_port = int(os.environ.pop(f"{_ENV_PREFIX}VNC_PORT"))
+        ws_port = _ws_port = int(os.environ.pop(f"{_ENV_PREFIX}WS_PORT"))
+        http_port = _http_port = int(os.environ.pop(f"{_ENV_PREFIX}HTTP_PORT"))
+        _current_screen = os.environ.pop(f"{_ENV_PREFIX}SCREEN", "all")
+        ws_pid = int(os.environ.pop(f"{_ENV_PREFIX}WS_PID"))
+        _procs.append(_AdoptedProcess(int(inherited), "x11vnc"))
+        _procs.append(_AdoptedProcess(ws_pid, "websockify"))
+    else:
+        vnc_port = _vnc_port = _free_port()
+        ws_port = _ws_port = _free_port()
+        http_port = _http_port = _free_port()
 
-    # websockify
-    ws_bin = shutil.which("websockify")
-    ws_cmd = (
-        [ws_bin] if ws_bin else [sys.executable, "-m", "websockify"]
-    )
-    ws_cmd += [str(ws_port), f"localhost:{vnc_port}"]
-    try:
-        wsproxy = subprocess.Popen(
-            ws_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        # x11vnc
+        try:
+            x11vnc = subprocess.Popen(
+                [
+                    "x11vnc", "-display", DISPLAY, "-viewonly", "-shared",
+                    "-forever", "-nopw", "-rfbport", str(vnc_port), "-q",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            sys.exit("x11vnc not found — install it (e.g. apt install x11vnc)")
+        _procs.append(x11vnc)
+        time.sleep(0.5)
+        if x11vnc.poll() is not None:
+            sys.exit("x11vnc failed to start")
+
+        # websockify
+        ws_bin = shutil.which("websockify")
+        ws_cmd = (
+            [ws_bin] if ws_bin else [sys.executable, "-m", "websockify"]
         )
-    except FileNotFoundError:
-        _cleanup()
-        sys.exit("websockify not found")
-    _procs.append(wsproxy)
-    time.sleep(0.3)
-    if wsproxy.poll() is not None:
-        _cleanup()
-        sys.exit("websockify failed to start")
+        ws_cmd += [str(ws_port), f"localhost:{vnc_port}"]
+        try:
+            wsproxy = subprocess.Popen(
+                ws_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except FileNotFoundError:
+            _cleanup()
+            sys.exit("websockify not found")
+        _procs.append(wsproxy)
+        time.sleep(0.3)
+        if wsproxy.poll() is not None:
+            _cleanup()
+            sys.exit("websockify failed to start")
 
     # HTTP server
+    http.server.ThreadingHTTPServer.allow_reuse_address = True
     _httpd = http.server.ThreadingHTTPServer(
         ("127.0.0.1", http_port), _handler_class(ws_port)
     )
     threading.Thread(target=_httpd.serve_forever, daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
+    threading.Thread(target=_file_watcher, daemon=True).start()
 
     url = f"http://localhost:{http_port}"
     print(f"\n  {url}\n")
     print("Ctrl+C to stop  ·  auto-exits after 5 min idle\n")
-    webbrowser.open(url)
+    if not inherited:
+        webbrowser.open(url)
 
     try:
         while not _stopping.is_set():
