@@ -39,6 +39,8 @@ _http_port = None
 _vnc_lock = threading.Lock()
 _vnc_restarting = False
 _current_screen = "all"
+_known_clients: set[str] = set()
+_first_client = True
 
 
 class _AdoptedProcess:
@@ -270,6 +272,20 @@ def _ensure_novnc():
     print("noVNC ready.")
 
 
+def _track_client(ip):
+    global _first_client
+    if ip in _known_clients:
+        return
+    _known_clients.add(ip)
+    if _first_client:
+        _first_client = False
+        return
+    subprocess.Popen(
+        ["notify-send", "spicetab", f"New connection from {ip}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
 def _handler_class(ws_port):
     page = (HTML % ws_port).encode()
 
@@ -280,6 +296,7 @@ def _handler_class(ws_port):
 
             if path == "/ping":
                 _last_ping = time.time()
+                _track_client(self.client_address[0])
                 self.send_response(204)
                 self.end_headers()
                 return
