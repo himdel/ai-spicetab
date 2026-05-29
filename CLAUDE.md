@@ -30,11 +30,23 @@ The toolbar has buttons for "All" plus each connected monitor (parsed from `xran
 
 ## Media controls
 
-Toolbar buttons for previous/play-pause/next call `playerctl` on the server.
+Toolbar buttons for play, pause, play-pause (grouped), then previous/next (separated). All call `playerctl <action>` on the server via `POST /api/playerctl/<action>`.
+
+## Auto-reload
+
+A file watcher thread polls `serve.py`'s mtime every second. On change, it stashes child PIDs and ports into env vars and does `os.execv` to re-exec. The new process adopts the existing x11vnc/websockify via `_AdoptedProcess` (a Popen-like wrapper around a PID), rebinds the HTTP server on the same port (`SO_REUSEADDR`), and skips reopening the browser. x11vnc and websockify keep running undisturbed.
+
+## Stale process cleanup
+
+On start, kills any x11vnc processes not belonging to the current session (skips the inherited PID on reload). Sends a `notify-send` if any were killed.
+
+## Connection notifications
+
+Tracks client IPs via `/ping`. The first client is silently accepted (the browser we opened). Any new IP after that triggers `notify-send "New connection from <ip>"`.
 
 ## Dependencies
 
-- **System:** `x11vnc` (apt install x11vnc), `playerctl` (for media controls), `xrandr` (for screen detection)
+- **System:** `x11vnc`, `playerctl`, `xrandr`, `notify-send` (libnotify)
 - **Python (via uv):** `websockify`
 - **Browser (auto-downloaded):** noVNC v1.4.0 (cached in `.novnc/`, gitignored)
 
@@ -43,3 +55,5 @@ Toolbar buttons for previous/play-pause/next call `playerctl` on the server.
 - noVNC over spice-html5: spice-html5 is for the SPICE protocol (KVM/QEMU VMs), x11vnc speaks VNC
 - Two-server design (HTTP + websockify) rather than one: lets us add the `/ping` heartbeat endpoint for auto-exit without patching websockify
 - noVNC's `scaleViewport = true` handles fit-to-window + resize tracking automatically
+- x11vnc restart uses SIGKILL not SIGTERM — x11vnc doesn't handle SIGTERM cleanly
+- Auto-reload uses `os.execv` with env var handoff rather than an external watcher tool — keeps it self-contained with no extra deps
