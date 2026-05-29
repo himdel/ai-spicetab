@@ -119,8 +119,11 @@ html,body{width:100%%;height:100%%;overflow:hidden;background:#222}
   <span>Screen:</span>
   <div id="screen-buttons"></div>
   <div class="sep"></div>
-  <button onclick="playerctl('previous')" title="Previous">&#x23EE;&#xFE0E;</button>
+  <button onclick="playerctl('play')" title="Play">&#x25B6;&#xFE0E;</button>
+  <button onclick="playerctl('pause')" title="Pause">&#x23F8;&#xFE0E;</button>
   <button onclick="playerctl('play-pause')" title="Play/Pause">&#x23EF;&#xFE0E;</button>
+  <div class="sep"></div>
+  <button onclick="playerctl('previous')" title="Previous">&#x23EE;&#xFE0E;</button>
   <button onclick="playerctl('next')" title="Next">&#x23ED;&#xFE0E;</button>
 </div>
 <div id="screen"><p id="msg">Connecting…</p></div>
