@@ -3,8 +3,10 @@
 
 import http.server
 import io
+import json
 import mimetypes
 import os
+import re
 import shutil
 import signal
 import socket
@@ -28,6 +30,67 @@ _last_ping = time.time()
 _procs: list[subprocess.Popen] = []
 _httpd = None
 _stopping = threading.Event()
+_vnc_port = None
+_vnc_lock = threading.Lock()
+_vnc_restarting = False
+_current_screen = "all"
+
+
+def _parse_screens():
+    try:
+        out = subprocess.check_output(["xrandr"], text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []
+    screens = []
+    for m in re.finditer(
+        r"^(\S+)\s+connected\s+(?:primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)",
+        out, re.MULTILINE,
+    ):
+        screens.append({
+            "name": m.group(1),
+            "w": int(m.group(2)), "h": int(m.group(3)),
+            "x": int(m.group(4)), "y": int(m.group(5)),
+        })
+    return screens
+
+
+def _restart_x11vnc(clip=None):
+    global _current_screen, _vnc_restarting
+    with _vnc_lock:
+        _vnc_restarting = True
+        for i, p in enumerate(_procs):
+            try:
+                if p.args[0] == "x11vnc":
+                    p.kill()
+                    p.wait(timeout=3)
+                    break
+            except (OSError, subprocess.TimeoutExpired, IndexError):
+                if hasattr(p, 'args') and p.args and p.args[0] == "x11vnc":
+                    break
+        else:
+            _vnc_restarting = False
+            return False
+
+        cmd = [
+            "x11vnc", "-display", DISPLAY, "-viewonly", "-shared",
+            "-forever", "-nopw", "-rfbport", str(_vnc_port), "-q",
+        ]
+        if clip:
+            cmd += ["-clip", clip]
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            _vnc_restarting = False
+            return False
+        _procs[i] = proc
+        time.sleep(0.5)
+        _vnc_restarting = False
+        if proc.poll() is not None:
+            return False
+        _current_screen = clip or "all"
+        return True
 
 
 HTML = """\
@@ -39,25 +102,88 @@ HTML = """\
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%%;height:100%%;overflow:hidden;background:#222}
-#screen{width:100%%;height:100%%}
+#toolbar{display:flex;align-items:center;gap:6px;padding:4px 8px;background:#1a1a1a;
+  border-bottom:1px solid #333;font:13px/1 system-ui,sans-serif;color:#aaa;
+  position:relative;z-index:10}
+#toolbar button{background:#333;color:#ccc;border:1px solid #444;border-radius:4px;
+  padding:4px 10px;cursor:pointer;font:inherit}
+#toolbar button:hover{background:#444;color:#fff}
+#toolbar button.active{background:#575;border-color:#6a6;color:#fff}
+#toolbar .sep{width:1px;height:18px;background:#444;margin:0 4px}
+#screen{width:100%%;height:calc(100%% - 31px)}
 #msg{color:#888;font:15px/1.4 system-ui,sans-serif;text-align:center;padding-top:45vh}
 </style>
 </head>
 <body>
+<div id="toolbar">
+  <span>Screen:</span>
+  <div id="screen-buttons"></div>
+  <div class="sep"></div>
+  <button onclick="playerctl('previous')" title="Previous">&#x23EE;&#xFE0E;</button>
+  <button onclick="playerctl('play-pause')" title="Play/Pause">&#x23EF;&#xFE0E;</button>
+  <button onclick="playerctl('next')" title="Next">&#x23ED;&#xFE0E;</button>
+</div>
 <div id="screen"><p id="msg">Connecting…</p></div>
 <script type="module">
 import RFB from './novnc/core/rfb.js';
+
 document.getElementById('msg')?.remove();
-const rfb = new RFB(document.getElementById('screen'),
-                    'ws://' + location.hostname + ':%d');
-rfb.scaleViewport = true;
-rfb.resizeSession = false;
-rfb.viewOnly = true;
-rfb.background = '#222';
-rfb.addEventListener('disconnect', e => {
-  document.getElementById('screen').innerHTML =
-    '<p id="msg">' + (e.detail.clean ? 'Disconnected.' : 'Connection lost.') + '</p>';
-});
+let rfb;
+function connect() {
+  rfb = new RFB(document.getElementById('screen'),
+                'ws://' + location.hostname + ':%d');
+  rfb.scaleViewport = true;
+  rfb.resizeSession = false;
+  rfb.viewOnly = true;
+  rfb.background = '#222';
+  rfb.addEventListener('disconnect', e => {
+    document.getElementById('screen').innerHTML =
+      '<p id="msg">' + (e.detail.clean ? 'Disconnected.' : 'Connection lost.') + '</p>';
+  });
+}
+connect();
+
+// screen switcher
+async function loadScreens() {
+  const resp = await fetch('/api/screens');
+  const data = await resp.json();
+  const container = document.getElementById('screen-buttons');
+  container.innerHTML = '';
+  const allBtn = document.createElement('button');
+  allBtn.textContent = 'All';
+  allBtn.dataset.screen = 'all';
+  if (data.current === 'all') allBtn.classList.add('active');
+  allBtn.onclick = () => switchScreen('all');
+  container.appendChild(allBtn);
+  data.screens.forEach(s => {
+    const btn = document.createElement('button');
+    btn.textContent = s.name;
+    btn.dataset.screen = s.name;
+    if (data.current === s.clip) btn.classList.add('active');
+    btn.onclick = () => switchScreen(s.name);
+    container.appendChild(btn);
+  });
+}
+
+async function switchScreen(name) {
+  const resp = await fetch('/api/screen/' + encodeURIComponent(name), {method: 'POST'});
+  if (!resp.ok) return;
+  document.querySelectorAll('#screen-buttons button').forEach(b => b.classList.remove('active'));
+  document.querySelector('#screen-buttons button[data-screen="' + name + '"]')?.classList.add('active');
+  // reconnect after x11vnc restart
+  document.getElementById('screen').innerHTML = '<p id="msg">Reconnecting…</p>';
+  setTimeout(() => {
+    document.getElementById('screen').innerHTML = '';
+    connect();
+  }, 800);
+}
+loadScreens();
+
+// media controls
+window.playerctl = async function(action) {
+  await fetch('/api/playerctl/' + action, {method: 'POST'});
+};
+
 setInterval(() => fetch('/ping').catch(() => {}), 15000);
 fetch('/ping');
 </script>
@@ -111,6 +237,23 @@ def _handler_class(ws_port):
                 self.end_headers()
                 return
 
+            if path == "/api/screens":
+                screens = _parse_screens()
+                data = {
+                    "screens": [
+                        {
+                            "name": s["name"],
+                            "clip": f"{s['w']}x{s['h']}+{s['x']}+{s['y']}",
+                        }
+                        for s in screens
+                    ],
+                    "current": _current_screen,
+                }
+                self._send(
+                    json.dumps(data).encode(), "application/json",
+                )
+                return
+
             if path in ("", "/", "/index.html"):
                 self._send(page, "text/html;charset=utf-8")
                 return
@@ -128,6 +271,53 @@ def _handler_class(ws_port):
                     )
                     self._send(fp.read_bytes(), ct)
                     return
+
+            self.send_error(404)
+
+        def do_POST(self):
+            path = urllib.parse.urlparse(self.path).path
+
+            if path.startswith("/api/screen/"):
+                name = urllib.parse.unquote(path[len("/api/screen/"):])
+                if name == "all":
+                    ok = _restart_x11vnc()
+                else:
+                    screens = _parse_screens()
+                    match = next(
+                        (s for s in screens if s["name"] == name), None,
+                    )
+                    if not match:
+                        self.send_error(404, "Unknown screen")
+                        return
+                    clip = f"{match['w']}x{match['h']}+{match['x']}+{match['y']}"
+                    ok = _restart_x11vnc(clip)
+                if ok:
+                    self.send_response(204)
+                    self.end_headers()
+                else:
+                    self.send_error(500, "Failed to restart x11vnc")
+                return
+
+            if path.startswith("/api/playerctl/"):
+                action = urllib.parse.unquote(
+                    path[len("/api/playerctl/"):]
+                )
+                if action not in ("play", "pause", "play-pause",
+                                  "next", "previous"):
+                    self.send_error(400, "Invalid action")
+                    return
+                try:
+                    subprocess.run(
+                        ["playerctl", action],
+                        timeout=5,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
+                self.send_response(204)
+                self.end_headers()
+                return
 
             self.send_error(404)
 
@@ -170,11 +360,11 @@ def _watchdog():
 
 
 def main():
-    global _httpd
+    global _httpd, _vnc_port
 
     _ensure_novnc()
 
-    vnc_port = _free_port()
+    vnc_port = _vnc_port = _free_port()
     ws_port = _free_port()
     http_port = _free_port()
 
@@ -228,9 +418,10 @@ def main():
 
     try:
         while not _stopping.is_set():
-            for p in _procs:
-                if p.poll() is not None:
-                    return
+            if not _vnc_restarting:
+                for p in _procs:
+                    if p.poll() is not None:
+                        return
             time.sleep(1)
     except KeyboardInterrupt:
         pass

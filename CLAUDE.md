@@ -24,9 +24,17 @@ All use random free ports. The browser connects to the HTTP server, loads noVNC 
 
 The browser page sends `/ping` every 15s. If no ping arrives for 5 minutes, the script kills everything and exits. Ctrl+C also does a clean shutdown.
 
+## Screen switching
+
+The toolbar has buttons for "All" plus each connected monitor (parsed from `xrandr`). Clicking one restarts x11vnc with `-clip WxH+X+Y` for that monitor, or without `-clip` for all. The browser reconnects automatically after the restart.
+
+## Media controls
+
+Toolbar buttons for previous/play-pause/next call `playerctl` on the server.
+
 ## Dependencies
 
-- **System:** `x11vnc` (apt install x11vnc)
+- **System:** `x11vnc` (apt install x11vnc), `playerctl` (for media controls), `xrandr` (for screen detection)
 - **Python (via uv):** `websockify`
 - **Browser (auto-downloaded):** noVNC v1.4.0 (cached in `.novnc/`, gitignored)
 
