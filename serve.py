@@ -453,9 +453,9 @@ def _watchdog():
             return
 
 
-def _kill_stale_x11vnc(keep_pid=None):
+def _kill_stale(name, keep_pid=None):
     try:
-        out = subprocess.check_output(["pgrep", "-a", "x11vnc"], text=True)
+        out = subprocess.check_output(["pgrep", "-a", name], text=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
         return
     killed = 0
@@ -471,7 +471,7 @@ def _kill_stale_x11vnc(keep_pid=None):
     if killed:
         subprocess.Popen(
             ["notify-send", "spicetab",
-             f"Killed {killed} stale x11vnc process{'es' if killed > 1 else ''}"],
+             f"Killed {killed} stale {name} process{'es' if killed > 1 else ''}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 
@@ -482,7 +482,9 @@ def main():
     _ensure_novnc()
 
     inherited = os.environ.pop(f"{_ENV_PREFIX}VNC_PID", None)
-    _kill_stale_x11vnc(keep_pid=int(inherited) if inherited else None)
+    inherited_ws = os.environ.get(f"{_ENV_PREFIX}WS_PID")
+    _kill_stale("x11vnc", keep_pid=int(inherited) if inherited else None)
+    _kill_stale("websockify", keep_pid=int(inherited_ws) if inherited_ws else None)
 
     if inherited:
         # Adopt existing child processes after execv reload
