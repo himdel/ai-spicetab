@@ -137,7 +137,7 @@ def _parse_windows():
     visible = _get_visible_desktops()
 
     screen_clip = None
-    if _current_screen != "all":
+    if _current_screen not in ("all", "none"):
         known_clips = {
             f"{s['w']}x{s['h']}+{s['x']}+{s['y']}" for s in _parse_screens()
         }
