@@ -182,6 +182,22 @@ def _get_window_geometry(wid):
     return f"{w}x{h}+{x}+{y}"
 
 
+def _stop_x11vnc():
+    global _current_screen, _vnc_restarting
+    with _vnc_lock:
+        _vnc_restarting = True
+        for p in _procs:
+            try:
+                if p.args[0] == "x11vnc":
+                    p.kill()
+                    p.wait(timeout=3)
+                    break
+            except (OSError, subprocess.TimeoutExpired, IndexError):
+                pass
+        _current_screen = "none"
+        _vnc_restarting = False
+
+
 def _restart_x11vnc(clip=None):
     global _current_screen, _vnc_restarting
     with _vnc_lock:
@@ -261,6 +277,7 @@ html,body{width:100%%;height:100%%;overflow:hidden;background:#222}
     <div id="window-dropdown"></div>
   </div>
   <button id="slop-btn" onclick="runSlop()" title="Select area">&#x2702;&#xFE0E; Area</button>
+  <button onclick="stopVnc()" title="Stop streaming">&#x2715; None</button>
   <div class="sep"></div>
   <button onclick="playerctl('play')" title="Play">&#x25B6;&#xFE0E;</button>
   <button onclick="playerctl('pause')" title="Pause">&#x23F8;&#xFE0E;</button>
@@ -374,6 +391,15 @@ async function switchWindow(wid, title) {
     connect();
   }, 800);
 }
+
+// stop streaming
+window.stopVnc = async function() {
+  await fetch('/api/stop', {method: 'POST'});
+  document.querySelectorAll('#screen-buttons button').forEach(b => b.classList.remove('active'));
+  document.getElementById('window-btn').innerHTML = '&#x25BE; Pick&hellip;';
+  document.getElementById('slop-btn').innerHTML = '&#x2702;&#xFE0E; Area';
+  document.getElementById('screen').innerHTML = '<p id="msg">Stopped.</p>';
+};
 
 // area select (slop)
 window.runSlop = async function() {
@@ -549,6 +575,12 @@ def _handler_class(ws_port):
                     self.end_headers()
                 else:
                     self.send_error(500, "Failed to restart x11vnc")
+                return
+
+            if path == "/api/stop":
+                _stop_x11vnc()
+                self.send_response(204)
+                self.end_headers()
                 return
 
             if path == "/api/slop":
@@ -764,7 +796,7 @@ def main():
 
     try:
         while not _stopping.is_set():
-            if not _vnc_restarting:
+            if not _vnc_restarting and _current_screen != "none":
                 for p in _procs:
                     if p.poll() is not None:
                         return
