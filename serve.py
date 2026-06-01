@@ -100,6 +100,71 @@ def _parse_screens():
     return screens
 
 
+def _get_current_desktop():
+    try:
+        out = subprocess.check_output(["wmctrl", "-d"], text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return 0
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "*":
+            return int(parts[0])
+    return 0
+
+
+def _parse_windows():
+    try:
+        desktop = _get_current_desktop()
+        out = subprocess.check_output(["wmctrl", "-lG"], text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []
+
+    screen_clip = None
+    if _current_screen != "all":
+        known_clips = {
+            f"{s['w']}x{s['h']}+{s['x']}+{s['y']}" for s in _parse_screens()
+        }
+        if _current_screen in known_clips:
+            m = re.match(r"(\d+)x(\d+)\+(\d+)\+(\d+)", _current_screen)
+            if m:
+                screen_clip = (
+                    int(m.group(3)), int(m.group(4)),
+                    int(m.group(1)), int(m.group(2)),
+                )
+
+    windows = []
+    for line in out.splitlines():
+        parts = line.split(None, 7)
+        if len(parts) < 8:
+            continue
+        desk = int(parts[1])
+        if desk != desktop:
+            continue
+        x, y, w, h = int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])
+        if w < 50 or h < 50:
+            continue
+        if screen_clip:
+            sx, sy, sw, sh = screen_clip
+            if not (x < sx + sw and x + w > sx and y < sy + sh and y + h > sy):
+                continue
+        windows.append({
+            "id": parts[0], "title": parts[7],
+            "x": x, "y": y, "w": w, "h": h,
+        })
+    return windows
+
+
+def _get_window_geometry(wid):
+    out = subprocess.check_output(
+        ["xwininfo", "-id", wid, "-frame"], text=True,
+    )
+    x = int(re.search(r"Absolute upper-left X:\s+(-?\d+)", out).group(1))
+    y = int(re.search(r"Absolute upper-left Y:\s+(-?\d+)", out).group(1))
+    w = int(re.search(r"Width:\s+(\d+)", out).group(1))
+    h = int(re.search(r"Height:\s+(\d+)", out).group(1))
+    return f"{w}x{h}+{x}+{y}"
+
+
 def _restart_x11vnc(clip=None):
     global _current_screen, _vnc_restarting
     with _vnc_lock:
@@ -156,6 +221,14 @@ html,body{width:100%%;height:100%%;overflow:hidden;background:#222}
 #toolbar button:hover{background:#444;color:#fff}
 #toolbar button.active{background:#575;border-color:#6a6;color:#fff}
 #toolbar .sep{width:1px;height:18px;background:#444;margin:0 4px}
+#window-picker{position:relative}
+#window-dropdown{display:none;position:absolute;top:100%%;left:0;min-width:220px;max-width:360px;
+  max-height:300px;overflow-y:auto;background:#2a2a2a;border:1px solid #444;border-radius:4px;
+  margin-top:4px;z-index:20;padding:2px 0}
+#window-dropdown button{display:block;width:100%%;text-align:left;background:none;color:#ccc;
+  border:none;padding:5px 10px;cursor:pointer;font:inherit;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+#window-dropdown button:hover{background:#444;color:#fff}
 #screen{width:100%%;height:calc(100%% - 31px)}
 #msg{color:#888;font:15px/1.4 system-ui,sans-serif;text-align:center;padding-top:45vh}
 </style>
@@ -164,6 +237,12 @@ html,body{width:100%%;height:100%%;overflow:hidden;background:#222}
 <div id="toolbar">
   <span>Screen:</span>
   <div id="screen-buttons"></div>
+  <div class="sep"></div>
+  <span>Window:</span>
+  <div id="window-picker">
+    <button id="window-btn" onclick="toggleWindowPicker()">&#x25BE; Pick&hellip;</button>
+    <div id="window-dropdown"></div>
+  </div>
   <div class="sep"></div>
   <button onclick="playerctl('play')" title="Play">&#x25B6;&#xFE0E;</button>
   <button onclick="playerctl('pause')" title="Pause">&#x23F8;&#xFE0E;</button>
@@ -219,6 +298,7 @@ async function switchScreen(name) {
   if (!resp.ok) return;
   document.querySelectorAll('#screen-buttons button').forEach(b => b.classList.remove('active'));
   document.querySelector('#screen-buttons button[data-screen="' + name + '"]')?.classList.add('active');
+  document.getElementById('window-btn').innerHTML = '&#x25BE; Pick&hellip;';
   // reconnect after x11vnc restart
   document.getElementById('screen').innerHTML = '<p id="msg">Reconnecting…</p>';
   setTimeout(() => {
@@ -227,6 +307,55 @@ async function switchScreen(name) {
   }, 800);
 }
 loadScreens();
+
+// window picker
+const wBtn = document.getElementById('window-btn');
+const wDrop = document.getElementById('window-dropdown');
+let wDropOpen = false;
+
+window.toggleWindowPicker = async function() {
+  if (wDropOpen) { wDrop.style.display = 'none'; wDropOpen = false; return; }
+  const resp = await fetch('/api/windows');
+  const data = await resp.json();
+  wDrop.innerHTML = '';
+  if (!data.windows.length) {
+    const el = document.createElement('button');
+    el.textContent = '(no windows)';
+    el.disabled = true;
+    wDrop.appendChild(el);
+  } else {
+    data.windows.forEach(w => {
+      const el = document.createElement('button');
+      el.textContent = w.title;
+      el.title = w.title;
+      el.onclick = (e) => { e.stopPropagation(); switchWindow(w.id, w.title); };
+      wDrop.appendChild(el);
+    });
+  }
+  wDrop.style.display = 'block';
+  wDropOpen = true;
+};
+
+document.addEventListener('click', (e) => {
+  if (wDropOpen && !document.getElementById('window-picker').contains(e.target)) {
+    wDrop.style.display = 'none';
+    wDropOpen = false;
+  }
+});
+
+async function switchWindow(wid, title) {
+  wDrop.style.display = 'none';
+  wDropOpen = false;
+  const resp = await fetch('/api/window/' + encodeURIComponent(wid), {method: 'POST'});
+  if (!resp.ok) return;
+  document.querySelectorAll('#screen-buttons button').forEach(b => b.classList.remove('active'));
+  wBtn.textContent = title.length > 24 ? title.slice(0, 22) + '…' : title;
+  document.getElementById('screen').innerHTML = '<p id="msg">Reconnecting…</p>';
+  setTimeout(() => {
+    document.getElementById('screen').innerHTML = '';
+    connect();
+  }, 800);
+}
 
 // media controls
 window.playerctl = async function(action) {
@@ -318,6 +447,13 @@ def _handler_class(ws_port):
                 )
                 return
 
+            if path == "/api/windows":
+                data = {"windows": _parse_windows()}
+                self._send(
+                    json.dumps(data).encode(), "application/json",
+                )
+                return
+
             if path in ("", "/", "/index.html"):
                 self._send(page, "text/html;charset=utf-8")
                 return
@@ -356,6 +492,24 @@ def _handler_class(ws_port):
                     clip = f"{match['w']}x{match['h']}+{match['x']}+{match['y']}"
                     ok = _restart_x11vnc(clip)
                 if ok:
+                    self.send_response(204)
+                    self.end_headers()
+                else:
+                    self.send_error(500, "Failed to restart x11vnc")
+                return
+
+            if path.startswith("/api/window/"):
+                wid = urllib.parse.unquote(path[len("/api/window/"):])
+                if not re.fullmatch(r"0x[0-9a-fA-F]+", wid):
+                    self.send_error(400, "Invalid window ID")
+                    return
+                try:
+                    clip = _get_window_geometry(wid)
+                except (subprocess.CalledProcessError, FileNotFoundError,
+                        AttributeError):
+                    self.send_error(404, "Window not found")
+                    return
+                if _restart_x11vnc(clip):
                     self.send_response(204)
                     self.end_headers()
                 else:
