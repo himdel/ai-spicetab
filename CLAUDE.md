@@ -28,6 +28,12 @@ The browser page sends `/ping` every 15s. If no ping arrives for 5 minutes, the 
 
 The toolbar has buttons for "All" plus each connected monitor (parsed from `xrandr`). Clicking one restarts x11vnc with `-clip WxH+X+Y` for that monitor, or without `-clip` for all. The browser reconnects automatically after the restart.
 
+## Window picker
+
+Next to the screen picker, a dropdown button lists individual windows (via `wmctrl -lG`). Only windows on currently visible virtual desktops are shown — visible desktops are detected by grouping `wmctrl -d` viewport positions (one desktop per unique viewport = one per monitor, supporting per-monitor workspaces like i3). When a specific monitor is selected, the list is further filtered to windows overlapping that monitor's geometry.
+
+Selecting a window restarts x11vnc with `-clip WxH+X+Y` using the window's frame geometry from `xwininfo -id <wid> -frame`. The window ID is validated server-side (`^0x[0-9a-fA-F]+$`).
+
 ## Media controls
 
 Toolbar buttons for play, pause, play-pause (grouped), then previous/next (separated). All call `playerctl <action>` on the server via `POST /api/playerctl/<action>`.
@@ -46,7 +52,7 @@ Tracks client IPs via `/ping`. The first client is silently accepted (the browse
 
 ## Dependencies
 
-- **System:** `x11vnc`, `playerctl`, `xrandr`, `notify-send` (libnotify)
+- **System:** `x11vnc`, `playerctl`, `xrandr`, `wmctrl`, `xwininfo`, `notify-send` (libnotify)
 - **Python (via uv):** `websockify`
 - **Browser (auto-downloaded):** noVNC v1.4.0 (cached in `.novnc/`, gitignored)
 

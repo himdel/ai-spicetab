@@ -100,24 +100,41 @@ def _parse_screens():
     return screens
 
 
-def _get_current_desktop():
+def _get_visible_desktops():
+    """Return set of desktop numbers currently visible on any monitor.
+
+    Groups desktops by viewport position (from wmctrl -d) and picks the
+    active one per unique viewport — one visible desktop per monitor.
+    """
     try:
         out = subprocess.check_output(["wmctrl", "-d"], text=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
-        return 0
+        return None
+    by_vp = {}
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[1] == "*":
-            return int(parts[0])
-    return 0
+        if len(parts) < 5:
+            continue
+        desk_num = int(parts[0])
+        is_active = parts[1] == "*"
+        try:
+            vp_idx = parts.index("VP:") + 1
+            vp_x, vp_y = (int(v) for v in parts[vp_idx].split(","))
+        except (ValueError, IndexError):
+            continue
+        vp = (vp_x, vp_y)
+        if vp not in by_vp or is_active:
+            by_vp[vp] = desk_num
+    return set(by_vp.values()) if by_vp else None
 
 
 def _parse_windows():
     try:
-        desktop = _get_current_desktop()
         out = subprocess.check_output(["wmctrl", "-lG"], text=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
         return []
+
+    visible = _get_visible_desktops()
 
     screen_clip = None
     if _current_screen != "all":
@@ -138,7 +155,7 @@ def _parse_windows():
         if len(parts) < 8:
             continue
         desk = int(parts[1])
-        if desk != desktop:
+        if visible is not None and desk not in visible:
             continue
         x, y, w, h = int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])
         if w < 50 or h < 50:
