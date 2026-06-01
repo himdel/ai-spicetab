@@ -34,6 +34,10 @@ Next to the screen picker, a dropdown button lists individual windows (via `wmct
 
 Selecting a window restarts x11vnc with `-clip WxH+X+Y` using the window's frame geometry from `xwininfo -id <wid> -frame`. The window ID is validated server-side (`^0x[0-9a-fA-F]+$`).
 
+## Area select (slop)
+
+A toolbar button that runs `slop -f %wx%h+%x+%y` on the server, letting the user click-drag to select an arbitrary screen region. The resulting geometry is used to restart x11vnc with `-clip`. The button label updates to show the current clip geometry. Requires `slop` installed on the system.
+
 ## Media controls
 
 Toolbar buttons for play, pause, play-pause (grouped), then previous/next (separated). All call `playerctl <action>` on the server via `POST /api/playerctl/<action>`.
@@ -52,7 +56,7 @@ Tracks client IPs via `/ping`. The first client is silently accepted (the browse
 
 ## Dependencies
 
-- **System:** `x11vnc`, `playerctl`, `xrandr`, `wmctrl`, `xwininfo`, `notify-send` (libnotify)
+- **System:** `x11vnc`, `playerctl`, `xrandr`, `wmctrl`, `xwininfo`, `slop`, `notify-send` (libnotify)
 - **Python (via uv):** `websockify`
 - **Browser (auto-downloaded):** noVNC v1.4.0 (cached in `.novnc/`, gitignored)
 

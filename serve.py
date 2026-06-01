@@ -260,6 +260,7 @@ html,body{width:100%%;height:100%%;overflow:hidden;background:#222}
     <button id="window-btn" onclick="toggleWindowPicker()">&#x25BE; Pick&hellip;</button>
     <div id="window-dropdown"></div>
   </div>
+  <button id="slop-btn" onclick="runSlop()" title="Select area">&#x2702;&#xFE0E; Area</button>
   <div class="sep"></div>
   <button onclick="playerctl('play')" title="Play">&#x25B6;&#xFE0E;</button>
   <button onclick="playerctl('pause')" title="Pause">&#x23F8;&#xFE0E;</button>
@@ -373,6 +374,23 @@ async function switchWindow(wid, title) {
     connect();
   }, 800);
 }
+
+// area select (slop)
+window.runSlop = async function() {
+  const btn = document.getElementById('slop-btn');
+  btn.textContent = 'Select…';
+  const resp = await fetch('/api/slop', {method: 'POST'});
+  if (!resp.ok) { btn.innerHTML = '&#x2702;&#xFE0E; Area'; return; }
+  const data = await resp.json();
+  document.querySelectorAll('#screen-buttons button').forEach(b => b.classList.remove('active'));
+  document.getElementById('window-btn').innerHTML = '&#x25BE; Pick&hellip;';
+  btn.innerHTML = '&#x2702;&#xFE0E; ' + data.clip;
+  document.getElementById('screen').innerHTML = '<p id="msg">Reconnecting…</p>';
+  setTimeout(() => {
+    document.getElementById('screen').innerHTML = '';
+    connect();
+  }, 800);
+};
 
 // media controls
 window.playerctl = async function(action) {
@@ -529,6 +547,28 @@ def _handler_class(ws_port):
                 if _restart_x11vnc(clip):
                     self.send_response(204)
                     self.end_headers()
+                else:
+                    self.send_error(500, "Failed to restart x11vnc")
+                return
+
+            if path == "/api/slop":
+                try:
+                    out = subprocess.check_output(
+                        ["slop", "-f", "%wx%h+%x+%y"],
+                        text=True, timeout=30,
+                    ).strip()
+                except (FileNotFoundError, subprocess.CalledProcessError,
+                        subprocess.TimeoutExpired):
+                    self.send_error(500, "slop failed")
+                    return
+                if not re.fullmatch(r"\d+x\d+\+\d+\+\d+", out):
+                    self.send_error(500, "Unexpected slop output")
+                    return
+                if _restart_x11vnc(out):
+                    self._send(
+                        json.dumps({"clip": out}).encode(),
+                        "application/json",
+                    )
                 else:
                     self.send_error(500, "Failed to restart x11vnc")
                 return
