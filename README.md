@@ -31,3 +31,5 @@ This handles the Python venv, dependencies, downloading noVNC, launching x11vnc 
 - `notify-send` (for connection notifications)
 
 Python dependencies (`websockify`) and noVNC are fetched automatically on first run.
+
+![](./screenshot.png)
